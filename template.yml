@@ -1,0 +1,136 @@
+Resources:
+    # - - - - - - - - - - - - - - - - - - - -
+    # SQS -> Lambda Workflow
+    # - SQS
+    # - Lambda SQS Trigger
+    # - Lambda Function
+    # - Lambda Role
+    # - - - - - - - - - - - - - - - - - - - -
+    MySourceQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+            RedrivePolicy:
+                deadLetterTargetArn:
+                    Fn::GetAtt:
+                        - 'MyDeadLetterQueue'
+                        - 'Arn'
+                maxReceiveCount: 5
+    LambdaFunctionEventSourceMapping:
+        Type: AWS::Lambda::EventSourceMapping
+        Properties:
+            BatchSize: 10
+            Enabled: true
+            EventSourceArn: !GetAtt MySourceQueue.Arn
+            FunctionName: !GetAtt QueueEventFunction.Arn
+    QueueEventFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+            Runtime: nodejs14.x
+            Role: !GetAtt LambdaRole.Arn
+            Handler: index.handler
+            Code:
+                ZipFile: |
+                    exports.handler = async (event) => {
+                        if (Math.floor(Math.random() * 100) > 50) {
+                          return "Success"
+                        } else {
+                          throw new Error("Mock Error")
+                        }
+                    }
+    LambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: SQSQueue-lambda-policy
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - lambda.amazonaws.com
+            Policies:
+                - PolicyName: allowSqs
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - sqs:ReceiveMessage
+                                - sqs:DeleteMessage
+                                - sqs:GetQueueAttributes
+                                - sqs:ChangeMessageVisibility
+                            Resource: !GetAtt MySourceQueue.Arn
+    # - - - - - - - - - - - - - - - - - - - -
+    # Handling Unprocessed Messages
+    # - SQS (Dead Letter Queue)
+    # - CloudWatch Alarm
+    # - - - - - - - - - - - - - - - - - - - -
+    MyDeadLetterQueue:
+        Type: AWS::SQS::Queue
+    DLQthresholdAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: 'Alarm dlq messages when we have 1 or more failed messages in 10 minutes'
+            Namespace: 'AWS/SQS'
+            MetricName: 'ApproximateNumberOfMessagesVisible'
+            Dimensions:
+                - Name: 'QueueName'
+                  Value:
+                      Fn::GetAtt:
+                          - 'MyDeadLetterQueue'
+                          - 'QueueName'
+            Statistic: 'Sum'
+            Period: 300
+            Unit: Count
+            DatapointsToAlarm: 1
+            EvaluationPeriods: 2
+            Threshold: 1
+            ComparisonOperator: 'GreaterThanOrEqualToThreshold'
+            AlarmActions:
+                - !Ref ChatOpsTopic
+
+    # - - - - - - - - - - - - - - - - - - - -
+    # ChatOps Configuration
+    # - SNS Topic
+    # - Slack Integration
+    # - Slack IAM Role
+    # - - - - - - - - - - - - - - - - - - - -
+    ChatOpsTopic:
+        Type: AWS::SNS::Topic
+        Properties:
+            TopicName: 'ChatOpsTopic'
+    SlackIntegration:
+        Type: AWS::Chatbot::SlackChannelConfiguration
+        Properties:
+            ConfigurationName: OpsIntegration
+            SlackChannelId: '{{resolve:ssm:opsSlackChannelId:1}}'
+            SlackWorkspaceId: '{{resolve:ssm:opsSlackWorkspaceId:1}}'
+            SnsTopicArns:
+                - !Ref ChatOpsTopic
+            IamRoleArn: !GetAtt ChatBotRole.Arn
+    ChatBotRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: ChatBot-policy
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - chatbot.amazonaws.com
+            Policies:
+                - PolicyName: allowSqs
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - 'cloudwatch:Describe*'
+                                - 'cloudwatch:Get*'
+                                - 'cloudwatch:List*'
+                            Resource: '*'
